@@ -181,7 +181,7 @@ void rewrite_comments(IStream *source,IStream *destination,DWORD serial,const By
     }
     require(selected && inserted && done);
     ULARGE_INTEGER size{}; size.QuadPart=tell(destination); check(destination->SetSize(size));
-    check(destination->Commit(STGC_DEFAULT));
+    commit_stream(destination);
 }
 HRESULT save_comments(ComPtr<IStream> &source,DWORD mode,const std::wstring &path,DWORD serial,const Bytes &packet) noexcept {
     return protect([&]() -> HRESULT {
@@ -204,11 +204,11 @@ HRESULT save_comments(ComPtr<IStream> &source,DWORD mode,const std::wstring &pat
         Temporary replacement(directory),backup(directory);
         rewrite_comments(source.p,replacement.stream.p,serial,packet);
         const uint64_t old_size=stream_size(source.p);
-        seek(source.p,0); copy_bytes(source.p,backup.stream.p,old_size); check(backup.stream->Commit(STGC_DEFAULT));
+        seek(source.p,0); copy_bytes(source.p,backup.stream.p,old_size); commit_stream(backup.stream.p);
         auto overwrite=[&](IStream *from,uint64_t bytes) {
             seek(from,0); seek(destination,0); copy_bytes(from,destination,bytes);
             ULARGE_INTEGER size{}; size.QuadPart=bytes;
-            check(destination->SetSize(size)); check(destination->Commit(STGC_DEFAULT));
+            check(destination->SetSize(size)); commit_stream(destination);
         };
         const auto result=protect([&]() -> HRESULT {
             overwrite(replacement.stream.p,stream_size(replacement.stream.p)); return S_OK;

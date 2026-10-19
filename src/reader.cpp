@@ -9,7 +9,7 @@ namespace {
 constexpr HRESULT not_vorbis = static_cast<HRESULT>(0x8bda0007);
 constexpr GUID stream_read{0x83e2bbbf,0x4fec,0x4e00,{0xa6,0x2c,0x62,0x61,0xfe,0x2b,0xa2,0xd4}};
 constexpr GUID stream_callback{0x1717a4a7,0xa3dc,0x416b,{0xa2,0x97,0x72,0x16,0x74,0x9b,0xd7,0xbf}};
-class OggReader final : public Reader, public Metadata, public Thumbnail {
+class OggReader final : public Reader, public Metadata, public Thumbnail, public MetadataCommit {
     LONG references_{1};
     ComPtr<IStream> stream_;
     ComPtr<IUnknown> extended_read_;
@@ -21,6 +21,8 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
     std::vector<float> opus_pcm_;
     WAVEFORMATEX format_{};
     bool opened_{}, dirty_{}, seekable_{}, remote_{};
+    bool committed_{};
+    HRESULT commit_result_{S_OK};
     DWORD duration_{}, mode_{}, serial_{};
     std::wstring path_;
     std::string vendor_;
@@ -55,13 +57,14 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         const HRESULT hr = self.stream_->Seek(n, DWORD(origin), nullptr);
         return SUCCEEDED(hr) ? 0 : -1;
     }
-    static long tell_callback(void *opaque) noexcept {
+    static ogg_int64_t tell_callback(void *opaque) noexcept {
         auto &self = *static_cast<OggReader *>(opaque);
         LARGE_INTEGER z{}; ULARGE_INTEGER position{};
         if (!self.seekable_ || FAILED(self.stream_->Seek(z, STREAM_SEEK_CUR, &position))) return -1;
-        // vorbisfile's Windows callback ABI has a signed 32-bit long.
-        if (position.QuadPart > LONG_MAX) return -1;
-        return long(position.QuadPart);
+        // Private static vorbisfile build widens only its tell callback. The
+        // exported TTPlayer ABI and upstream decoder arithmetic are unchanged.
+        if (position.QuadPart > INT64_MAX) return -1;
+        return ogg_int64_t(position.QuadPart);
     }
     static int opus_read(void *opaque,unsigned char *data,int bytes) noexcept {
         auto &self=*static_cast<OggReader *>(opaque);
@@ -157,18 +160,11 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         tags_.swap(updated); covers_.swap(pictures); dirty_=true;
     }
     ~OggReader() {
-        close_decoder();
-        if (dirty_ && stream_) {
-            const HRESULT hr = protect([&]() -> HRESULT {
-                extended_read_.reset();
-                content_.reset();
-                return save_comments(stream_, mode_, path_, serial_, packet(tags_));
-            });
-            if (FAILED(hr)) {
+        const HRESULT hr = Commit();
+        if (FAILED(hr)) {
                 wchar_t message[120];
                 swprintf_s(message, L"ttp_ogg: metadata save failed (0x%08lX); rollback attempted.\n", ULONG(hr));
                 OutputDebugStringW(message);
-            }
         }
         if (event_) CloseHandle(event_);
     }
@@ -179,6 +175,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         if (same(iid, IID_IUnknown) || same(iid, iid_reader)) *out = static_cast<Reader *>(this);
         else if (same(iid, iid_metadata)) *out = static_cast<Metadata *>(this);
         else if (same(iid, iid_thumbnail)) *out = static_cast<Thumbnail *>(this);
+        else if (same(iid, iid_metadata_commit)) *out = static_cast<MetadataCommit *>(this);
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
@@ -188,7 +185,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
     }
     HRESULT STDMETHODCALLTYPE Open(IStream *stream, DWORD) override {
         if (!stream) return E_POINTER;
-        if (stream_) return E_UNEXPECTED;
+        if (stream_ || committed_) return E_UNEXPECTED;
         const HRESULT hr = protect([&]() -> HRESULT {
             io_error_ = pending_error_ = S_OK;
             duration_ = mode_ = serial_ = 0;
@@ -379,6 +376,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
     }
     HRESULT STDMETHODCALLTYPE Set(const char *key, const wchar_t *value) override {
         if (!key) return E_POINTER;
+        if (committed_) return E_UNEXPECTED;
         if (!(capabilities() & 4)) return E_ACCESSDENIED;
         return protect([&]() -> HRESULT {
             const auto name = wide(key);
@@ -413,6 +411,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         *out=&p.view; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE AddPicture(const Picture *picture) override {
+        if (committed_) return E_UNEXPECTED;
         if(!picture) return E_POINTER;
         if(picture->size<sizeof(Picture)) return E_INVALIDARG;
         if(!(capabilities()&16)) return E_ACCESSDENIED;
@@ -425,6 +424,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         });
     }
     HRESULT STDMETHODCALLTYPE RemovePicture(DWORD index) override {
+        if (committed_) return E_UNEXPECTED;
         if(!(capabilities()&16)) return E_ACCESSDENIED;
         if(index>=covers_.size()) return E_INVALIDARG;
         return protect([&]() -> HRESULT {
@@ -436,6 +436,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
         });
     }
     HRESULT STDMETHODCALLTYPE ReplacePicture(DWORD index,const Picture *picture,DWORD mask) override {
+        if (committed_) return E_UNEXPECTED;
         if(!picture) return E_POINTER;
         if(!(capabilities()&16)) return E_ACCESSDENIED;
         if(index>=covers_.size() || picture->size<sizeof(Picture) || (mask&~15u)) return E_INVALIDARG;
@@ -452,6 +453,20 @@ class OggReader final : public Reader, public Metadata, public Thumbnail {
             if(old.mime_index!=SIZE_MAX) { updated[old.mime_index].value.clear(); updated[old.mime_index].changed=true; }
             change_tags(std::move(updated)); return S_OK;
         });
+    }
+    HRESULT STDMETHODCALLTYPE Commit() override {
+        if (committed_) return commit_result_;
+        committed_ = true;
+        close_decoder();
+        commit_result_ = protect([&]() -> HRESULT {
+            extended_read_.reset();
+            content_.reset();
+            if (!dirty_) return S_OK;
+            const HRESULT result = save_comments(stream_, mode_, path_, serial_, packet(tags_));
+            if (SUCCEEDED(result)) dirty_ = false;
+            return result;
+        });
+        return commit_result_;
     }
 };
 } // namespace

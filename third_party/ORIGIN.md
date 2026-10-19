@@ -11,7 +11,14 @@
 | YY-Thunks 1.2.2 | https://github.com/Chuyu-Team/YY-Thunks/releases/download/v1.2.2/YY-Thunks-Objs.zip | `518ed7ef4825e8a41997fbccfa2c8090cf31a6038fd51520a2e49886f947f9fc` |
 | VC-LTL 5.3.1 | https://github.com/Chuyu-Team/VC-LTL5/releases/download/v5.3.1/VC-LTL-Binary.7z | `7a18799ed3aa84a225610a5447a56bc534c5c98ccb8dec05caba0e3f633431ad` |
 
-Xiph 库源码未经修改。构建层关闭共享库、上游测试及安装文档，设置 CMake 兼容版本、大小优化和精确浮点。
+libogg、libopus、opusfile 算法源码未修改。2026-10-19 对 libvorbis 1.3.7 的构建目录副本作如下适配：
+
+- `include/vorbis/vorbisfile.h` 的 `ov_callbacks.tell_func` 从 Windows 32 位 `long` 扩展为 `ogg_int64_t`。
+- 头文件及 `lib/vorbisfile.c` 的 stdio 回调同步改为 `_ftelli64` 和对应的函数指针类型。
+- 宿主 Reader 回调同步返回 64 位位置。只用于本 DLL 私有静态库，不能与未修改的共享 libvorbisfile 互换；未改变 TTPlayer 的工厂和虚表 ABI。
+- `cmake/vorbis.cmake` 校验固定原文并在构建目录应用修改，不改下载缓存、不提交上游源码。
+
+构建层关闭共享库、上游测试及安装文档，设置 CMake 兼容版本、大小优化和精确浮点。
 VC-LTL/YY-Thunks 采用 `cmake/legacy_windows.cmake` 的 XP 配置。
 
 版权文本：

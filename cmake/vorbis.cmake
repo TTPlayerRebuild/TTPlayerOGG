@@ -9,7 +9,8 @@ FetchContent_Declare(ttplayer_ogg
 FetchContent_Declare(ttplayer_vorbis
   URL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz
   URL_HASH SHA256=b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SOURCE_SUBDIR ttplayer-populate-only)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static codec libraries" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "No upstream tests in distribution builds" FORCE)
 set(INSTALL_DOCS OFF CACHE BOOL "No upstream documentation build" FORCE)
@@ -19,6 +20,22 @@ FetchContent_MakeAvailable(ttplayer_ogg)
 set(OGG_INCLUDE_DIR "${ttplayer_ogg_SOURCE_DIR}/include" CACHE PATH "libogg headers" FORCE)
 set(OGG_LIBRARY ogg CACHE STRING "Static libogg target" FORCE)
 FetchContent_MakeAvailable(ttplayer_vorbis)
+# Windows long is 32-bit even for a 64-bit file offset. Use a private static
+# callback ABI, patched in the build tree; never edit downloaded shared sources.
+set(TTP_VORBIS_PATCHED "${CMAKE_CURRENT_BINARY_DIR}/libvorbis-1.3.7-patched")
+file(COPY "${ttplayer_vorbis_SOURCE_DIR}/" DESTINATION "${TTP_VORBIS_PATCHED}")
+foreach(part include/vorbis/vorbisfile.h lib/vorbisfile.c)
+  file(READ "${ttplayer_vorbis_SOURCE_DIR}/${part}" content)
+  string(FIND "${content}" "(long (*)(void *))" found)
+  if(found EQUAL -1)
+    message(FATAL_ERROR "vorbisfile 64-bit tell adaptation does not match ${part}")
+  endif()
+  string(REPLACE "long   (*tell_func)" "ogg_int64_t (*tell_func)" content "${content}")
+  string(REPLACE "(long (*)(void *))" "(ogg_int64_t (*)(void *))" content "${content}")
+  string(REPLACE "                            ftell" "                            _ftelli64" content "${content}")
+  file(WRITE "${TTP_VORBIS_PATCHED}/${part}" "${content}")
+endforeach()
+add_subdirectory("${TTP_VORBIS_PATCHED}" "${ttplayer_vorbis_BINARY_DIR}")
 foreach(codec ogg vorbis vorbisfile)
   target_compile_options(${codec} PRIVATE /Os /Gy /Gw /GF /fp:precise /arch:SSE2 /utf-8
     /wd4244 /wd4267 /wd4996)

@@ -24,6 +24,11 @@ inline void check(HRESULT hr) {
     if (FAILED(hr))
         throw Failure{hr};
 }
+inline void commit_stream(IStream *stream) {
+    const HRESULT hr = stream->Commit(STGC_DEFAULT);
+    // Original direct file streams write through and leave Commit unimplemented.
+    if (hr != E_NOTIMPL && hr != STG_E_INVALIDFUNCTION) check(hr);
+}
 template <class F> HRESULT protect(F &&f) noexcept {
     try {
         return f();
