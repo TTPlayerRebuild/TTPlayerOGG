@@ -1,3 +1,4 @@
+#include "ttpcomm/audio_format_probe_impl.h"
 #include "pictures.h"
 #include <vorbis/vorbisfile.h>
 #include <opusfile.h>
@@ -9,7 +10,7 @@ namespace {
 constexpr HRESULT not_vorbis = static_cast<HRESULT>(0x8bda0007);
 constexpr GUID stream_read{0x83e2bbbf,0x4fec,0x4e00,{0xa6,0x2c,0x62,0x61,0xfe,0x2b,0xa2,0xd4}};
 constexpr GUID stream_callback{0x1717a4a7,0xa3dc,0x416b,{0xa2,0x97,0x72,0x16,0x74,0x9b,0xd7,0xbf}};
-class OggReader final : public Reader, public Metadata, public Thumbnail, public MetadataCommit {
+class OggReader final : public Reader, public Metadata, public Thumbnail, public MetadataCommit, public ttp::format::InfoSupport {
     LONG references_{1};
     ComPtr<IStream> stream_;
     ComPtr<IUnknown> extended_read_;
@@ -171,6 +172,9 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
   public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
         if (!out) return E_POINTER;
+        if (IsEqualIID(iid, ttp::format::iid_info)) { *out=static_cast<ttp::format::SourceInfo*>(this); AddRef(); return S_OK; }
+
+        if (!out) return E_POINTER;
         *out = nullptr;
         if (same(iid, IID_IUnknown) || same(iid, iid_reader)) *out = static_cast<Reader *>(this);
         else if (same(iid, iid_metadata)) *out = static_cast<Metadata *>(this);
@@ -183,7 +187,12 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     ULONG STDMETHODCALLTYPE Release() override {
         const auto n = InterlockedDecrement(&references_); if (!n) delete this; return n;
     }
-    HRESULT STDMETHODCALLTYPE Open(IStream *stream, DWORD) override {
+    HRESULT STDMETHODCALLTYPE Open(IStream* probe_stream, DWORD probe_flags) override {
+        const auto probed = PrepareFormatInfo(probe_stream, ttp::format::Ogg);
+        if (FAILED(probed)) return probed;
+        return CompleteFormatInfo(OpenImpl(probe_stream, probe_flags));
+    }
+    HRESULT OpenImpl(IStream *stream, DWORD) {
         if (!stream) return E_POINTER;
         if (stream_ || committed_) return E_UNEXPECTED;
         const HRESULT hr = protect([&]() -> HRESULT {
