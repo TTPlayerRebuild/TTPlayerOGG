@@ -1,4 +1,5 @@
 #include "ttpcomm/audio_format_probe_impl.h"
+#include "ttpcomm/pcm_format.h"
 #include "pictures.h"
 #include <vorbis/vorbisfile.h>
 #include <opusfile.h>
@@ -8,12 +9,10 @@
 namespace ttp::ogg {
 namespace {
 constexpr HRESULT not_vorbis = static_cast<HRESULT>(0x8bda0007);
-constexpr GUID stream_read{0x83e2bbbf,0x4fec,0x4e00,{0xa6,0x2c,0x62,0x61,0xfe,0x2b,0xa2,0xd4}};
 constexpr GUID stream_callback{0x1717a4a7,0xa3dc,0x416b,{0xa2,0x97,0x72,0x16,0x74,0x9b,0xd7,0xbf}};
 class OggReader final : public Reader, public Metadata, public Thumbnail, public MetadataCommit, public ttp::format::InfoSupport {
     LONG references_{1};
     ComPtr<IStream> stream_;
-    ComPtr<IUnknown> extended_read_;
     ComPtr<Metadata> content_;
     OggVorbis_File vorbis_{};
     OggOpusFile *opus_{};
@@ -23,6 +22,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     WAVEFORMATEX format_{};
     bool opened_{}, dirty_{}, seekable_{}, remote_{};
     bool committed_{};
+    bool seek_restore_failed_{};
     HRESULT commit_result_{S_OK};
     DWORD duration_{}, mode_{}, serial_{};
     std::wstring path_;
@@ -30,7 +30,14 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     std::vector<Tag> tags_;
     std::vector<Cover> covers_;
     HRESULT io_error_{S_OK}, pending_error_{S_OK};
+    uint64_t io_position_{};
+    Bytes retry_bytes_;
+    size_t retry_position_{};
     HANDLE event_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+
+    static bool cancelled(HRESULT hr) noexcept {
+        return hr == E_ABORT || hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    }
 
     static size_t read_callback(void *out, size_t size, size_t count, void *opaque) noexcept {
         auto &self = *static_cast<OggReader *>(opaque);
@@ -38,34 +45,65 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (size > MAXDWORD || count > MAXDWORD / size) {
             self.io_error_ = E_INVALIDARG; return 0;
         }
+        if (FAILED(self.io_error_)) return 0;
+        if (self.retry_position_ < self.retry_bytes_.size()) {
+            const auto n = std::min(size * count, self.retry_bytes_.size() - self.retry_position_);
+            if (self.io_position_ > INT64_MAX - uint64_t(n)) {
+                self.io_error_ = STG_E_READFAULT; return 0;
+            }
+            memcpy(out, self.retry_bytes_.data() + self.retry_position_, n);
+            self.retry_position_ += n; self.io_position_ += n;
+            if (self.retry_position_ == self.retry_bytes_.size()) {
+                self.retry_bytes_.clear(); self.retry_position_ = 0;
+            }
+            return n / size;
+        }
         ULONG got{};
-        HRESULT hr;
-        if (self.extended_read_) {
-            // Current original 60552873 -> 83E2BBBF... slot 14, 60 s timeout.
-            using Read = HRESULT(STDMETHODCALLTYPE *)(IUnknown *, void *, ULONG, ULONG *, HANDLE, DWORD);
-            auto **v = *reinterpret_cast<void ***>(self.extended_read_.p);
-            hr = reinterpret_cast<Read>(v[14])(self.extended_read_.p, out,
-                      ULONG(size * count), &got, self.event_, 60000);
-        } else hr = self.stream_->Read(out, ULONG(size * count), &got);
-        if (FAILED(hr)) { self.io_error_ = hr; return 0; }
+        // Read/seek through one standard stream. Track position ourselves:
+        // some original host streams accept Seek but leave its output at zero.
+        const HRESULT hr = self.stream_->Read(out, ULONG(size * count), &got);
         if (got > size * count) { self.io_error_ = STG_E_READFAULT; return 0; }
+        if (self.io_position_ > INT64_MAX - uint64_t(got)) { self.io_error_ = STG_E_READFAULT; return 0; }
+        if (FAILED(hr)) {
+            self.io_error_ = hr;
+            // A host can consume bytes before reporting cancellation. Keep
+            // those bytes for Start(), including when this stream cannot seek.
+            if (cancelled(hr) && got) {
+                try {
+                    const auto* bytes = static_cast<const BYTE*>(out);
+                    self.retry_bytes_.assign(bytes, bytes + got); self.retry_position_ = 0;
+                } catch (...) { self.io_error_ = E_OUTOFMEMORY; }
+            }
+            return 0;
+        }
+        self.io_position_ += got;
         return got / size;
     }
     static int seek_callback(void *opaque, ogg_int64_t offset, int origin) noexcept {
         auto &self = *static_cast<OggReader *>(opaque);
         if (!self.seekable_ || origin < SEEK_SET || origin > SEEK_END) return -1;
-        LARGE_INTEGER n{}; n.QuadPart = offset;
-        const HRESULT hr = self.stream_->Seek(n, DWORD(origin), nullptr);
+        uint64_t base = origin == SEEK_CUR ? self.io_position_ : 0;
+        if (origin == SEEK_END) {
+            STATSTG stat{};
+            const auto hr = self.stream_->Stat(&stat, STATFLAG_NONAME);
+            if (FAILED(hr)) { self.io_error_ = hr; return -1; }
+            base = stat.cbSize.QuadPart;
+        }
+        if (base > INT64_MAX || (offset >= 0 ? uint64_t(offset) > INT64_MAX-base : uint64_t(-(offset+1))+1 > base)) return -1;
+        LARGE_INTEGER n{}; n.QuadPart = int64_t(base) + offset;
+        const HRESULT hr = self.stream_->Seek(n, STREAM_SEEK_SET, nullptr);
+        if (SUCCEEDED(hr)) {
+            self.io_position_ = uint64_t(n.QuadPart);
+            self.retry_bytes_.clear(); self.retry_position_ = 0;
+        } else self.io_error_ = hr;
         return SUCCEEDED(hr) ? 0 : -1;
     }
     static ogg_int64_t tell_callback(void *opaque) noexcept {
         auto &self = *static_cast<OggReader *>(opaque);
-        LARGE_INTEGER z{}; ULARGE_INTEGER position{};
-        if (!self.seekable_ || FAILED(self.stream_->Seek(z, STREAM_SEEK_CUR, &position))) return -1;
         // Private static vorbisfile build widens only its tell callback. The
         // exported TTPlayer ABI and upstream decoder arithmetic are unchanged.
-        if (position.QuadPart > INT64_MAX) return -1;
-        return ogg_int64_t(position.QuadPart);
+        if (!self.seekable_ || self.io_position_ > INT64_MAX) return -1;
+        return ogg_int64_t(self.io_position_);
     }
     static int opus_read(void *opaque,unsigned char *data,int bytes) noexcept {
         auto &self=*static_cast<OggReader *>(opaque);
@@ -74,10 +112,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         return FAILED(self.io_error_)?-1:int(got);
     }
     static opus_int64 opus_tell(void *opaque) noexcept {
-        auto &self=*static_cast<OggReader *>(opaque);
-        LARGE_INTEGER z{}; ULARGE_INTEGER p{};
-        if(!self.seekable_ || FAILED(self.stream_->Seek(z,STREAM_SEEK_CUR,&p)) || p.QuadPart>INT64_MAX) return -1;
-        return opus_int64(p.QuadPart);
+        return tell_callback(opaque);
     }
     Bytes identify() {
         struct Sync { ogg_sync_state s{}; Sync(){check(ogg_sync_init(&s)?E_OUTOFMEMORY:S_OK);} ~Sync(){ogg_sync_clear(&s);} } sync;
@@ -106,16 +141,45 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (opened_ && !is_opus_) ov_clear(&vorbis_);
         opened_=false;
     }
+    HRESULT reopen_at(ogg_int64_t position) noexcept {
+        const auto result = protect([&]() -> HRESULT {
+            const bool expected_opus = is_opus_;
+            close_decoder(); io_error_ = S_OK;
+            if (seek_callback(this, 0, SEEK_SET)) return FAILED(io_error_) ? io_error_ : E_FAIL;
+            auto initial = identify();
+            require(is_opus_ == expected_opus, HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+            if (is_opus_) {
+                OpusFileCallbacks callbacks{opus_read, seek_callback, opus_tell, nullptr};
+                int error{};
+                opus_ = op_open_callbacks(this, &callbacks, initial.data(), initial.size(), &error);
+                if (!opus_) return FAILED(io_error_) ? io_error_ : not_vorbis;
+                opened_ = true;
+                const auto* head = op_head(opus_, 0);
+                require(head && head->channel_count == format_.nChannels && head->mapping_family <= 1, E_NOTIMPL);
+                require(op_set_gain_offset(opus_, OP_HEADER_GAIN, 0) == 0);
+            } else {
+                ov_callbacks callbacks{read_callback, seek_callback, nullptr, tell_callback};
+                if (ov_open_callbacks(this, &vorbis_, reinterpret_cast<const char*>(initial.data()), long(initial.size()), callbacks) < 0)
+                    return FAILED(io_error_) ? io_error_ : not_vorbis;
+                opened_ = true;
+                const auto* info = ov_info(&vorbis_, 0);
+                require(info && info->channels == format_.nChannels && DWORD(info->rate) == format_.nSamplesPerSec, E_NOTIMPL);
+            }
+            const auto status = is_opus_ ? op_pcm_seek(opus_, position) : ov_pcm_seek(&vorbis_, position);
+            return FAILED(io_error_) ? io_error_ : status ? E_FAIL : S_OK;
+        });
+        if (FAILED(result)) close_decoder();
+        return result;
+    }
     void fallback_content() {
-        if (content_ || !stream_) return;
+        if (content_ || !stream_ || !seekable_) return;
         const auto create = standard_content();
         if (!create) return;
-        LARGE_INTEGER z{}; ULARGE_INTEGER position{};
-        const bool restore = SUCCEEDED(stream_->Seek(z, STREAM_SEEK_CUR, &position));
+        const auto position = io_position_;
         ULONGLONG bytes{};
         const auto hr = create(stream_.p, 0, content_.put(), &bytes);
         if (FAILED(hr)) content_.reset();
-        if (restore) { LARGE_INTEGER p{}; p.QuadPart = position.QuadPart; stream_->Seek(p, STREAM_SEEK_SET, nullptr); }
+        if (seekable_) { LARGE_INTEGER p{}; p.QuadPart = position; check(stream_->Seek(p, STREAM_SEEK_SET, nullptr)); }
     }
     DWORD capabilities() const noexcept {
         DWORD bits = (remote_ ? 1u : 0u) | (seekable_ ? 2u : 0u);
@@ -197,21 +261,30 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (stream_ || committed_) return E_UNEXPECTED;
         const HRESULT hr = protect([&]() -> HRESULT {
             io_error_ = pending_error_ = S_OK;
+            seek_restore_failed_ = false;
             duration_ = mode_ = serial_ = 0;
             path_.clear(); vendor_.clear(); format_ = {};
             suffix_.clear(); covers_.clear(); tags_.clear(); opus_pcm_.clear();
+            retry_bytes_.clear(); retry_position_ = 0;
             dirty_ = seekable_ = remote_ = false;
             stream_ = ComPtr<IStream>(stream, true);
             STATSTG st{};
-            if (SUCCEEDED(stream_->Stat(&st, STATFLAG_DEFAULT))) {
+            const auto stat_result = stream_->Stat(&st, STATFLAG_DEFAULT);
+            const bool size_known = stat_result == S_OK && st.cbSize.QuadPart != 0;
+            if (SUCCEEDED(stat_result)) {
                 struct Free { wchar_t *p; ~Free() { CoTaskMemFree(p); } } name{st.pwcsName};
                 mode_ = st.grfMode;
                 if (st.pwcsName) path_ = st.pwcsName;
                 remote_ = path_.find(L"://") != std::wstring::npos;
+                require(st.cbSize.QuadPart <= INT64_MAX, HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
             }
             LARGE_INTEGER z{}; ULARGE_INTEGER p{};
-            seekable_ = SUCCEEDED(stream_->Seek(z, STREAM_SEEK_CUR, &p));
-            stream_->QueryInterface(stream_read, reinterpret_cast<void **>(extended_read_.put()));
+            const auto seek_result = stream_->Seek(z, STREAM_SEEK_CUR, &p);
+            // END-relative callbacks require a reliable length. Unknown-size
+            // streams still decode sequentially even if CUR happens to work.
+            seekable_ = size_known && SUCCEEDED(seek_result);
+            io_position_ = seekable_ ? p.QuadPart : 0;
+            require(io_position_ <= INT64_MAX, HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
             auto initial=identify();
             unsigned channels{}; DWORD rate{};
             if(is_opus_) {
@@ -250,7 +323,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
             load_tags();
             return S_OK;
         });
-        if (FAILED(hr)) { close_decoder(); extended_read_.reset(); content_.reset(); stream_.reset(); tags_.clear(); }
+        if (FAILED(hr)) { close_decoder(); content_.reset(); stream_.reset(); tags_.clear(); }
         return hr;
     }
     HRESULT STDMETHODCALLTYPE Capabilities(DWORD *out) override {
@@ -260,10 +333,8 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (!out) return E_POINTER; *out = duration_; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Format(WAVEFORMATEX **out) override {
-        if (!out) return E_POINTER; *out = nullptr;
-        if (!opened_) return E_UNEXPECTED;
-        auto *p = static_cast<WAVEFORMATEX *>(CoTaskMemAlloc(sizeof(format_)));
-        if (!p) return E_OUTOFMEMORY; *p = format_; *out = p; return S_OK;
+        if(!out)return E_POINTER;*out=nullptr;if(!opened_)return E_UNEXPECTED;
+        return ttp::pcm::copy_format(format_, ttp::pcm::standard_mask(format_.nChannels), format_.wBitsPerSample, out);
     }
     HRESULT STDMETHODCALLTYPE BufferSize(DWORD *out) override {
         if (!out) return E_POINTER; *out = format_.nBlockAlign * 1024; return S_OK;
@@ -286,10 +357,19 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         }
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE Start() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Start() override {
+        if (!seek_restore_failed_ && (cancelled(pending_error_) || cancelled(io_error_))) {
+            pending_error_ = io_error_ = S_OK;
+        }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE Stop() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE Read(Buffer *target) override {
         if (!target) return E_POINTER;
+        if (seek_restore_failed_) {
+            const auto hr = target->SetLength(0);
+            return FAILED(hr) ? hr : pending_error_;
+        }
         if (!opened_) return E_UNEXPECTED;
         return protect([&]() -> HRESULT {
             check(target->SetLength(0));
@@ -324,15 +404,15 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
                 if (!is_opus_ && (!info || info->channels != format_.nChannels || DWORD(info->rate) != format_.nSamplesPerSec)) {
                     pending_error_ = E_NOTIMPL; break;
                 }
-                constexpr unsigned surround[6]{0,2,1,5,3,4};
-                constexpr unsigned opus_order[8][8]{{0},{0,1},{0,2,1},{0,1,2,3},
+                constexpr unsigned windows_order[8][8]{{0},{0,1},{0,2,1},{0,1,2,3},
                     {0,2,1,3,4},{0,2,1,5,3,4},{0,2,1,6,5,3,4},{0,2,1,7,5,6,3,4}};
-                // Keep original Vorbis 6055299A parity. Opus family 1 follows
-                // Vorbis ordering and is mapped to Windows 3.0/quad/5.x/6.1/7.1.
+                // Vorbis mapping 0 and Opus family 1 use the same standard
+                // 1..8 channel order. Reorder both to match our Windows mask.
+                // Larger Vorbis layouts are application-defined: no guessing.
                 for (long frame = 0; frame < n; ++frame) {
                     for (unsigned channel = 0; channel < format_.nChannels; ++channel) {
-                        const auto source=is_opus_?opus_order[format_.nChannels-1][channel]:
-                            format_.nChannels==6?surround[channel]:channel;
+                        const auto source = format_.nChannels <= 8 ?
+                            windows_order[format_.nChannels-1][channel] : channel;
                         const double value=is_opus_?opus_pcm_[size_t(frame)*format_.nChannels+source]:pcm[source][frame];
                         std::memcpy(data + used, &value, sizeof(value)); used += sizeof(value);
                     }
@@ -344,11 +424,32 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     }
     HRESULT STDMETHODCALLTYPE Seek(DWORD *position) override {
         if (!position) return E_POINTER;
-        if (!opened_) return E_UNEXPECTED;
+        if (!opened_ && !seek_restore_failed_) return E_UNEXPECTED;
+        if (!seekable_) return E_NOTIMPL;
+        if (!opened_) {
+            const auto result = reopen_at(ogg_int64_t(*position) * format_.nSamplesPerSec / 1000);
+            if (FAILED(result)) { pending_error_ = result; return result; }
+            seek_restore_failed_ = false; pending_error_ = io_error_ = S_OK;
+            return S_OK;
+        }
+        const auto previous = is_opus_ ? op_pcm_tell(opus_) : ov_pcm_tell(&vorbis_);
         io_error_ = S_OK;
         const int result = is_opus_?op_pcm_seek(opus_,ogg_int64_t(*position)*48):ov_time_seek(&vorbis_, double(*position) / 1000.0);
-        if (result) return FAILED(io_error_) ? io_error_ : E_FAIL;
-        pending_error_ = S_OK; return S_OK;
+        if (result || FAILED(io_error_)) {
+            const HRESULT error = FAILED(io_error_) ? io_error_ : E_FAIL;
+            // Failed Vorbis seeks can invalidate its internal decode state.
+            // Reopening also forces a real stream Seek, even when a failed
+            // host operation moved the physical cursor before returning.
+            const auto restored = previous < 0 ? E_FAIL : reopen_at(previous);
+            // A failed host Seek can move the underlying stream anyway. If
+            // rollback also fails, do not read from an indeterminate position;
+            // a later successful explicit Seek can clear this terminal state.
+            seek_restore_failed_ = FAILED(restored);
+            if (seek_restore_failed_) pending_error_ = error;
+            else pending_error_ = io_error_ = S_OK;
+            return error;
+        }
+        seek_restore_failed_ = false; pending_error_ = S_OK; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Count(DWORD *out) override {
         if (!out) return E_POINTER;
@@ -467,8 +568,8 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (committed_) return commit_result_;
         committed_ = true;
         close_decoder();
+        seek_restore_failed_ = false;
         commit_result_ = protect([&]() -> HRESULT {
-            extended_read_.reset();
             content_.reset();
             if (!dirty_) return S_OK;
             const HRESULT result = save_comments(stream_, mode_, path_, serial_, packet(tags_));

@@ -1,5 +1,9 @@
 # ttp_ogg
 
+最新补全与验收：[2026-10-24](docs/COMPLETION_20261024.md)。
+后续修复：[顺序流、取消／定位恢复与 Vorbis 多声道排列](docs/STREAM_BOUNDARIES_20261024.md)。
+后续验收：[真实 HTTP、断线续传与 Opus 定位](docs/HTTP_VALIDATION_20261025.md)（XP／Win7／Win11 各 20 项通过，DLL 未变）。
+
 面向千千静听原版与 TTPlayer Rebuild 的 x86 **Ogg Vorbis / Opus 输入插件**。
 依据工作区 `AddIn/ttp_ogg.dll` 的伪代码、二进制接口及本地行为重建，并对照旧版 `TTPlayer5719/AddIn/ttp_ogg.dll`。
 
