@@ -31,7 +31,7 @@ private:
     HRESULT STDMETHODCALLTYPE Create(void **out) override { return make_reader(out); }
     HRESULT STDMETHODCALLTYPE Name(wchar_t **out) override { return text(L"OGG Reader", out); }
     HRESULT STDMETHODCALLTYPE Extensions(wchar_t **out) override {
-        return text(L"Vorbis/Opus 音频文件(*.ogg;*.oga;*.opus)", out);
+        return text(L"Vorbis/Opus/Speex 音频文件(*.ogg;*.oga;*.opus;*.spx)", out);
     }
 };
 class SoundAddIn final : public AddIn {

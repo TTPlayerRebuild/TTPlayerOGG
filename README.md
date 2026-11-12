@@ -1,10 +1,12 @@
 # ttp_ogg
 
+新增：[2026-11-11 Ogg Speex / `.spx`](docs/SPEEX.md)。
+
 最新补全与验收：[2026-10-24](docs/COMPLETION_20261024.md)。
 后续修复：[顺序流、取消／定位恢复与 Vorbis 多声道排列](docs/STREAM_BOUNDARIES_20261024.md)。
 后续验收：[真实 HTTP、断线续传与 Opus 定位](docs/HTTP_VALIDATION_20261025.md)（XP／Win7／Win11 各 20 项通过，DLL 未变）。
 
-面向千千静听原版与 TTPlayer Rebuild 的 x86 **Ogg Vorbis / Opus 输入插件**。
+面向千千静听原版与 TTPlayer Rebuild 的 x86 **Ogg Vorbis / Opus / Speex 输入插件**。
 依据工作区 `AddIn/ttp_ogg.dll` 的伪代码、二进制接口及本地行为重建，并对照旧版 `TTPlayer5719/AddIn/ttp_ogg.dll`。
 
 宿主适配层与标签保存模块为重建实现，Vorbis、Opus 算法使用固定版本的 Xiph 官方库。Vorbis 恢复原插件行为；Opus 和封面是在相同宿主 ABI 上新增的功能。它不是原二进制的逐字节复刻，也不声称获得了厂商原始源码。
@@ -12,15 +14,16 @@
 ## 功能
 
 - 原 `ttpGetSoundAddIn`、ReaderCreator、Reader、Metadata x86 ABI。
-- 单一 `OGG Reader` 工厂，声明 `*.ogg;*.oga;*.opus`，根据真实 Ogg BOS 头选择解码器。
+- 单一 `OGG Reader` 工厂，声明 `*.ogg;*.oga;*.opus;*.spx`，根据真实 Ogg BOS 头选择解码器。
 - 宿主 IStream、不可定位网络流、扩展读取与回调转发。
 - IEEE float64 PCM、原六声道顺序、时长、码率、时间定位、同格式链式播放。
 - Opus 输出 48 kHz，处理 pre-skip、末尾裁剪、头部增益及 family 0/1 的 1～8 声道；提供 R128 到宿主 ReplayGain 的查询适配。
+- Speex NB/WB/UWB、单/双声道、多帧包、granule 裁剪与重放式精确定位；限制见 [SPEEX.md](docs/SPEEX.md)。
 - UTF-8 文本标签，大小写不敏感查找，保留同名多值，修改首个匹配值。
 - 最终 Release 或可选 MetadataCommit 时提交一次；保留压缩音频包、时间位置、其他逻辑流及尾部附加数据。
 - Unicode 路径、短写检查、失败回滚；原 ABI 不变，新宿主可查询扩展接口取得真实保存结果。
 
-两种编码共用 Thumbnail 接口：读取、添加、替换和删除 PNG/JPEG/GIF 封面；支持多图、优先正面封面、兼容旧式 COVERART。
+三种编码共用 Thumbnail 接口：读取、添加、替换和删除 PNG/JPEG/GIF 封面；支持多图、优先正面封面、兼容旧式 COVERART。
 
 原 DLL 不提供 Thumbnail；本版新增宿主已有的 Thumbnail ABI，仍不提供 Encoder 或独立 Decoder 工厂。
 
@@ -43,6 +46,7 @@
 | libvorbis / vorbisfile | 1.3.7 | Vorbis 解码与定位 |
 | libopus | 1.6.1 | Opus 解码 |
 | opusfile | 0.12 | Ogg Opus 定位、裁剪、标签与图片解析 |
+| Speex | 1.2.1 | Ogg Speex 浮点解码 |
 | VC-LTL | 5.3.1 | XP CRT 适配 |
 | YY-Thunks | 1.2.2 | Windows API 兼容 |
 

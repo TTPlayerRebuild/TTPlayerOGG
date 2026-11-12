@@ -7,7 +7,7 @@ struct Tag {
     bool changed{};
 };
 Bytes comment_packet(const std::string &vendor, const std::vector<Tag> &tags,
-                     bool opus = false, const Bytes &suffix = {});
+                     bool opus = false, const Bytes &suffix = {}, bool speex = false);
 // Replaces only the first selected logical stream's comment packet. Audio
 // lacing, payload, granule positions, other streams and trailing bytes survive.
 void rewrite_comments(IStream *source, IStream *destination, DWORD serial, const Bytes &packet);

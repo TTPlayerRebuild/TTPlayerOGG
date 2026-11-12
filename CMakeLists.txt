@@ -9,8 +9,9 @@ include(cmake/legacy_windows.cmake)
 include(cmake/size_release.cmake)
 include(cmake/vorbis.cmake)
 include(cmake/opus.cmake)
+include(cmake/speex.cmake)
 include(cmake/version.cmake)
-add_library(ttp_ogg SHARED src/plugin.cpp src/reader.cpp src/comments.cpp src/pictures.cpp
+add_library(ttp_ogg SHARED src/plugin.cpp src/reader.cpp src/speex_file.cpp src/comments.cpp src/pictures.cpp
   src/ttp_ogg.def "${CMAKE_CURRENT_BINARY_DIR}/generated/version.rc")
 add_dependencies(ttp_ogg ttp_ogg_version)
 target_include_directories(ttp_ogg PUBLIC include PRIVATE src)
@@ -18,7 +19,9 @@ target_compile_definitions(ttp_ogg PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_
   _WIN32_WINNT=0x0501 _CRT_SECURE_NO_WARNINGS)
 target_compile_options(ttp_ogg PRIVATE /W4 /permissive- /EHsc /GR- /Os /Gy /Gw /GF
   /utf-8 /fp:precise /arch:SSE2)
-target_link_libraries(ttp_ogg PRIVATE vorbisfile vorbis opusfile ogg ole32 uuid shlwapi)
+target_link_libraries(ttp_ogg PRIVATE vorbisfile vorbis opusfile ttp_speex ogg ole32 uuid shlwapi)
+target_link_options(ttp_ogg PRIVATE /ENTRY:DllMainCRTStartupForYY_Thunks
+  /alternatename:_YY_ThunksOriginalDllMainCRTStartup@12=__DllMainCRTStartup@12)
 target_link_options(ttp_ogg PRIVATE /OPT:REF /OPT:ICF /INCREMENTAL:NO /DEBUG:NONE)
 set_target_properties(ttp_ogg PROPERTIES PREFIX "" OUTPUT_NAME "ttp_ogg")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

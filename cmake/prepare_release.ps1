@@ -24,7 +24,7 @@ $notes = @"
 **更新记录**: $logUrl
 
 解压 ttp_ogg-$version.zip，关闭播放器后，将 AddIn/ttp_ogg.dll 放入安装目录。
-支持 Ogg Vorbis / Opus 播放、定位、文本标签编辑及封面读写。
+支持 Ogg Vorbis / Opus / Speex（.spx）播放、定位、文本标签编辑及封面读写。
 同一 x86 DLL 面向 XP SP3、Win7 和新系统，CPU 需要 SSE2。
 ZIP 仅包含 AddIn/ttp_ogg.dll 和 SHA256SUMS.txt；版权与许可证保留在下方链接的源码仓库，不嵌入 DLL。
 
@@ -33,6 +33,7 @@ ZIP 仅包含 AddIn/ttp_ogg.dll 和 SHA256SUMS.txt；版权与许可证保留在
 [libvorbis 版权与许可证]($repoUrl/blob/$Commit/third_party/libvorbis/COPYING)
 [libopus 版权、许可证及专利许可链接]($repoUrl/blob/$Commit/third_party/opus/COPYING)
 [opusfile 版权与许可证]($repoUrl/blob/$Commit/third_party/opusfile/COPYING)
+[Speex 版权与许可证]($repoUrl/blob/$Commit/third_party/speex/COPYING)
 [VC-LTL 许可证]($repoUrl/blob/$Commit/docs/licenses/VC-LTL-LICENSE.txt)
 [YY-Thunks 许可证]($repoUrl/blob/$Commit/docs/licenses/YY-Thunks-LICENSE.txt)
 "@

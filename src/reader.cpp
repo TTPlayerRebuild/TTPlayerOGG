@@ -1,6 +1,7 @@
 #include "ttpcomm/audio_format_probe_impl.h"
 #include "ttpcomm/pcm_format.h"
 #include "pictures.h"
+#include "speex_file.h"
 #include <vorbis/vorbisfile.h>
 #include <opusfile.h>
 #include <cmath>
@@ -17,6 +18,9 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     OggVorbis_File vorbis_{};
     OggOpusFile *opus_{};
     bool is_opus_{};
+    bool is_speex_{};
+    std::unique_ptr<SpeexFile> speex_;
+    uint64_t speex_total_{};
     Bytes suffix_;
     std::vector<float> opus_pcm_;
     WAVEFORMATEX format_{};
@@ -125,8 +129,9 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
             while((status=ogg_sync_pageout(&sync.s,&page))!=0) {
                 if(status<0) continue;
                 if(!ogg_page_bos(&page) || ogg_page_continued(&page) || !page.header[26]) continue;
-                if(page.body_len>=19 && !memcmp(page.body,"OpusHead",8)) { is_opus_=true; return prefix; }
-                if(page.body_len>=30 && !memcmp(page.body,"\1vorbis",7)) { is_opus_=false; return prefix; }
+                if(page.body_len>=19 && !memcmp(page.body,"OpusHead",8)) { is_opus_=true; is_speex_=false; return prefix; }
+                if(page.body_len>=30 && !memcmp(page.body,"\1vorbis",7)) { is_opus_=false; is_speex_=false; return prefix; }
+                if(page.body_len>=80 && !memcmp(page.body,"Speex   ",8)) { is_opus_=false; is_speex_=true; return prefix; }
             }
             char *buffer=ogg_sync_buffer(&sync.s,4096); require(buffer,E_OUTOFMEMORY);
             const size_t n=read_callback(buffer,1,4096,this);
@@ -137,18 +142,25 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         throw Failure{not_vorbis};
     }
     void close_decoder() noexcept {
+        speex_.reset();
         if (opus_) { op_free(opus_); opus_=nullptr; }
-        if (opened_ && !is_opus_) ov_clear(&vorbis_);
+        if (opened_ && !is_opus_ && !is_speex_) ov_clear(&vorbis_);
         opened_=false;
     }
     HRESULT reopen_at(ogg_int64_t position) noexcept {
         const auto result = protect([&]() -> HRESULT {
             const bool expected_opus = is_opus_;
+            const bool expected_speex = is_speex_;
             close_decoder(); io_error_ = S_OK;
             if (seek_callback(this, 0, SEEK_SET)) return FAILED(io_error_) ? io_error_ : E_FAIL;
             auto initial = identify();
-            require(is_opus_ == expected_opus, HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
-            if (is_opus_) {
+            require(is_opus_ == expected_opus && is_speex_ == expected_speex, HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+            if (is_speex_) {
+                speex_ = std::make_unique<SpeexFile>(); speex_->open(this, opus_read, initial);
+                require(speex_->channels == format_.nChannels && speex_->rate == format_.nSamplesPerSec);
+                require(position >= 0, E_INVALIDARG); speex_->discard(uint64_t(position)); opened_ = true;
+                return S_OK;
+            } else if (is_opus_) {
                 OpusFileCallbacks callbacks{opus_read, seek_callback, opus_tell, nullptr};
                 int error{};
                 opus_ = op_open_callbacks(this, &callbacks, initial.data(), initial.size(), &error);
@@ -190,6 +202,10 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         return bits;
     }
     void load_tags() {
+        if (is_speex_) {
+            vendor_ = speex_->vendor; tags_ = speex_->tags; suffix_ = speex_->suffix;
+            covers_ = read_pictures(tags_); return;
+        }
         const auto *v = is_opus_?nullptr:ov_comment(&vorbis_,0);
         const auto *o = is_opus_?op_tags(opus_,0):nullptr;
         if (v || o) {
@@ -218,7 +234,12 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         covers_=read_pictures(tags_);
         if (tags_.empty()) fallback_content();
     }
-    Bytes packet(const std::vector<Tag> &tags) const { return comment_packet(vendor_,tags,is_opus_,suffix_); }
+    Bytes packet(const std::vector<Tag> &tags) const {
+        auto result = comment_packet(vendor_,tags,is_opus_,suffix_,is_speex_);
+        // Never save a Speex comment packet larger than this reader accepts.
+        require(!is_speex_ || result.size() <= 16 * 1024 * 1024, HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
+        return result;
+    }
     void change_tags(std::vector<Tag> updated) {
         packet(updated);
         auto pictures=read_pictures(updated);
@@ -267,6 +288,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
             suffix_.clear(); covers_.clear(); tags_.clear(); opus_pcm_.clear();
             retry_bytes_.clear(); retry_position_ = 0;
             dirty_ = seekable_ = remote_ = false;
+            is_opus_ = is_speex_ = false;
             stream_ = ComPtr<IStream>(stream, true);
             STATSTG st{};
             const auto stat_result = stream_->Stat(&st, STATFLAG_DEFAULT);
@@ -287,7 +309,16 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
             require(io_position_ <= INT64_MAX, HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
             auto initial=identify();
             unsigned channels{}; DWORD rate{};
-            if(is_opus_) {
+            if(is_speex_) {
+                speex_ = std::make_unique<SpeexFile>(); speex_->open(this, opus_read, initial);
+                channels = speex_->channels; rate = speex_->rate; serial_ = speex_->serial; opened_ = true;
+                if (seekable_) {
+                    const auto saved = io_position_;
+                    speex_total_ = speex_->total = SpeexFile::scan_total(stream_.p, serial_);
+                    require(!seek_callback(this, ogg_int64_t(saved), SEEK_SET), STG_E_SEEKERROR);
+                }
+                duration_ = milliseconds(speex_->total, rate);
+            } else if(is_opus_) {
                 OpusFileCallbacks callbacks{opus_read,seekable_?seek_callback:nullptr,seekable_?opus_tell:nullptr,nullptr};
                 int error{};
                 opus_=op_open_callbacks(this,&callbacks,initial.data(),initial.size(),&error);
@@ -339,11 +370,11 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
     HRESULT STDMETHODCALLTYPE BufferSize(DWORD *out) override {
         if (!out) return E_POINTER; *out = format_.nBlockAlign * 1024; return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE CodecName(wchar_t **out) override { return text(is_opus_?L"OPUS|Opus Audio":L"Ogg|Vorbis/Ogg Audio", out); }
+    HRESULT STDMETHODCALLTYPE CodecName(wchar_t **out) override { return text(is_speex_?L"SPX|Speex Audio":is_opus_?L"OPUS|Opus Audio":L"Ogg|Vorbis/Ogg Audio", out); }
     HRESULT STDMETHODCALLTYPE Bitrate(DWORD *out) override {
         if (!out) return E_POINTER;
         if (!opened_) { *out = 0; return E_UNEXPECTED; }
-        const long rate = is_opus_?op_bitrate(opus_,-1):ov_bitrate(&vorbis_, -1); *out = rate > 0 ? DWORD(rate) : 0; return S_OK;
+        const long rate = is_speex_?long(speex_->bitrate):is_opus_?op_bitrate(opus_,-1):ov_bitrate(&vorbis_, -1); *out = rate > 0 ? DWORD(rate) : 0; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE BitDepth(WORD *out) override {
         if (!out) return E_POINTER; *out = 16; return S_OK;
@@ -379,6 +410,15 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
             const DWORD align = format_.nBlockAlign;
             require(data && capacity >= align, HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
             capacity -= capacity % align;
+            if (is_speex_) {
+                DWORD got{};
+                const auto hr = protect([&] { got = speex_->read(data, capacity / align); return S_OK; });
+                if (FAILED(hr)) {
+                    pending_error_ = FAILED(io_error_) ? io_error_ : hr;
+                    return pending_error_;
+                }
+                check(target->SetLength(got * align)); return got ? S_OK : S_FALSE;
+            }
             DWORD used{}; unsigned holes{};
             while (used < capacity) {
                 float **pcm{}; int section{};
@@ -426,6 +466,19 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if (!position) return E_POINTER;
         if (!opened_ && !seek_restore_failed_) return E_UNEXPECTED;
         if (!seekable_) return E_NOTIMPL;
+        if (is_speex_) {
+            const auto target = std::min<uint64_t>(uint64_t(*position) * format_.nSamplesPerSec / 1000,
+                speex_total_);
+            const auto previous = speex_ ? speex_->position() : 0;
+            const auto result = reopen_at(ogg_int64_t(target));
+            if (FAILED(result)) {
+                seek_restore_failed_ = FAILED(reopen_at(ogg_int64_t(previous)));
+                if (seek_restore_failed_) pending_error_ = result;
+                return result;
+            }
+            seek_restore_failed_ = false; pending_error_ = io_error_ = S_OK;
+            *position = milliseconds(target, format_.nSamplesPerSec); return S_OK;
+        }
         if (!opened_) {
             const auto result = reopen_at(ogg_int64_t(*position) * format_.nSamplesPerSec / 1000);
             if (FAILED(result)) { pending_error_ = result; return result; }
@@ -508,7 +561,7 @@ class OggReader final : public Reader, public Metadata, public Thumbnail, public
         if(!out) return E_POINTER; *out=DWORD(covers_.size()); return S_OK;
     }
     HRESULT STDMETHODCALLTYPE MaximumBytes(DWORD *out) override {
-        if(!out) return E_POINTER; *out=max_picture_bytes; return S_OK;
+        if(!out) return E_POINTER; *out=is_speex_?std::min<DWORD>(max_picture_bytes,12*1024*1024-1024):max_picture_bytes; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE MaximumCount(DWORD *out) override {
         if(!out) return E_POINTER; *out=max_pictures; return S_OK;

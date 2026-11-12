@@ -1,0 +1,5 @@
+Speex 1.2.1, Xiph.Org BSD-style license (COPYING).
+https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz
+SHA256: 4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea
+Statically compiled floating-point core, without upstream command-line tools.
+The Reader widens decoded float samples to float64; this is not a float64 core.

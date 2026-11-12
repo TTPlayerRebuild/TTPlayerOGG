@@ -104,8 +104,8 @@ struct Temporary {
     ~Temporary() { stream.reset(); if(!keep) DeleteFileW(name.c_str()); }
 };
 } // namespace
-Bytes comment_packet(const std::string &vendor,const std::vector<Tag> &tags,bool opus,const Bytes &suffix) {
-    Bytes out = opus ? Bytes{'O','p','u','s','T','a','g','s'} : Bytes{3,'v','o','r','b','i','s'};
+Bytes comment_packet(const std::string &vendor,const std::vector<Tag> &tags,bool opus,const Bytes &suffix,bool speex) {
+    Bytes out = speex ? Bytes{} : opus ? Bytes{'O','p','u','s','T','a','g','s'} : Bytes{3,'v','o','r','b','i','s'};
     add_string(out,vendor);
     require(out.size() <= max_comment_bytes - 4, HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
     const size_t count_at=out.size(); append32(out,0); DWORD count{};
@@ -116,10 +116,10 @@ Bytes comment_packet(const std::string &vendor,const std::vector<Tag> &tags,bool
         add_string(out,raw); ++count;
     }
     set_le32(out.data()+count_at,count);
-    const size_t extra = opus ? suffix.size() : 1;
+    const size_t extra = opus || speex ? suffix.size() : 1;
     require(extra <= max_comment_bytes && out.size() <= max_comment_bytes - extra,
             HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
-    if (opus) out.insert(out.end(), suffix.begin(), suffix.end());
+    if (opus || speex) out.insert(out.end(), suffix.begin(), suffix.end());
     else out.push_back(1);
     return out;
 }

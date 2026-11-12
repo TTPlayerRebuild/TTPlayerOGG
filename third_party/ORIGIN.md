@@ -8,6 +8,7 @@
 | libvorbis 1.3.7 | https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz | `b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b` |
 | libopus 1.6.1 | https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz | `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1` |
 | opusfile 0.12 | https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz | `118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b` |
+| Speex 1.2.1 | https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | `4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea` |
 | YY-Thunks 1.2.2 | https://github.com/Chuyu-Team/YY-Thunks/releases/download/v1.2.2/YY-Thunks-Objs.zip | `518ed7ef4825e8a41997fbccfa2c8090cf31a6038fd51520a2e49886f947f9fc` |
 | VC-LTL 5.3.1 | https://github.com/Chuyu-Team/VC-LTL5/releases/download/v5.3.1/VC-LTL-Binary.7z | `7a18799ed3aa84a225610a5447a56bc534c5c98ccb8dec05caba0e3f633431ad` |
 
